@@ -1,14 +1,12 @@
 import type { ClawdbotEnv } from '../types';
-import { R2_MOUNT_PATH } from '../config';
 
 /**
  * Build environment variables to pass to the Clawdbot container process
  * 
  * @param env - Worker environment bindings
- * @param r2Mounted - Whether R2 storage was successfully mounted
  * @returns Environment variables record
  */
-export function buildEnvVars(env: ClawdbotEnv, r2Mounted: boolean): Record<string, string> {
+export function buildEnvVars(env: ClawdbotEnv): Record<string, string> {
   const envVars: Record<string, string> = {};
 
   if (env.ANTHROPIC_API_KEY) envVars.ANTHROPIC_API_KEY = env.ANTHROPIC_API_KEY;
@@ -22,12 +20,6 @@ export function buildEnvVars(env: ClawdbotEnv, r2Mounted: boolean): Record<strin
   if (env.DISCORD_DM_POLICY) envVars.DISCORD_DM_POLICY = env.DISCORD_DM_POLICY;
   if (env.SLACK_BOT_TOKEN) envVars.SLACK_BOT_TOKEN = env.SLACK_BOT_TOKEN;
   if (env.SLACK_APP_TOKEN) envVars.SLACK_APP_TOKEN = env.SLACK_APP_TOKEN;
-
-  // If R2 is mounted, tell clawdbot to use it for state/config
-  if (r2Mounted) {
-    envVars.CLAWDBOT_STATE_DIR = R2_MOUNT_PATH;
-    envVars.CLAWDBOT_CONFIG_PATH = `${R2_MOUNT_PATH}/clawdbot.json`;
-  }
 
   return envVars;
 }

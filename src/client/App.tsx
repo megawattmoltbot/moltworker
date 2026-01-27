@@ -1,4 +1,4 @@
-import DevicesPage from './pages/DevicesPage'
+import AdminPage from './pages/AdminPage'
 import './App.css'
 
 export default function App() {
@@ -8,7 +8,7 @@ export default function App() {
         <h1>Clawdbot Admin</h1>
       </header>
       <main className="app-main">
-        <DevicesPage />
+        <AdminPage />
       </main>
     </div>
   )

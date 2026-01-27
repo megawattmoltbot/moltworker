@@ -2,7 +2,8 @@ import { Hono } from 'hono';
 import type { AppEnv } from '../types';
 import type { Process } from '@cloudflare/sandbox';
 import { createAccessMiddleware } from '../auth';
-import { ensureClawdbotGateway, findExistingClawdbotProcess } from '../gateway';
+import { ensureClawdbotGateway, findExistingClawdbotProcess, mountR2Storage } from '../gateway';
+import { R2_MOUNT_PATH } from '../config';
 
 // CLI commands can take 10-15 seconds to complete due to WebSocket connection overhead
 const CLI_TIMEOUT_MS = 20000;
@@ -179,8 +180,9 @@ api.post('/devices/approve-all', async (c) => {
   }
 });
 
-// GET /api/storage - Get R2 storage status
+// GET /api/storage - Get R2 storage status and last sync time
 api.get('/storage', async (c) => {
+  const sandbox = c.get('sandbox');
   const hasCredentials = !!(
     c.env.R2_ACCESS_KEY_ID && 
     c.env.R2_SECRET_ACCESS_KEY && 
@@ -193,13 +195,84 @@ api.get('/storage', async (c) => {
   if (!c.env.R2_SECRET_ACCESS_KEY) missing.push('R2_SECRET_ACCESS_KEY');
   if (!c.env.CF_ACCOUNT_ID) missing.push('CF_ACCOUNT_ID');
 
+  let lastSync: string | null = null;
+
+  // If R2 is configured, check for last sync timestamp
+  if (hasCredentials) {
+    try {
+      // Mount R2 if not already mounted
+      await mountR2Storage(sandbox, c.env);
+      
+      // Check for sync marker file
+      const proc = await sandbox.startProcess(`cat ${R2_MOUNT_PATH}/.last-sync 2>/dev/null || echo ""`);
+      await waitForProcess(proc, 5000);
+      const logs = await proc.getLogs();
+      const timestamp = logs.stdout?.trim();
+      if (timestamp && timestamp !== '') {
+        lastSync = timestamp;
+      }
+    } catch {
+      // Ignore errors checking sync status
+    }
+  }
+
   return c.json({
     configured: hasCredentials,
     missing: missing.length > 0 ? missing : undefined,
+    lastSync,
     message: hasCredentials 
       ? 'R2 storage is configured. Your data will persist across container restarts.'
       : 'R2 storage is not configured. Paired devices and conversations will be lost when the container restarts.',
   });
+});
+
+// POST /api/storage/sync - Trigger a manual sync to R2
+api.post('/storage/sync', async (c) => {
+  const sandbox = c.get('sandbox');
+  
+  // Check if R2 is configured
+  if (!c.env.R2_ACCESS_KEY_ID || !c.env.R2_SECRET_ACCESS_KEY || !c.env.CF_ACCOUNT_ID) {
+    return c.json({ error: 'R2 storage is not configured' }, 400);
+  }
+
+  try {
+    // Mount R2 if not already mounted
+    const mounted = await mountR2Storage(sandbox, c.env);
+    if (!mounted) {
+      return c.json({ error: 'Failed to mount R2 storage' }, 500);
+    }
+
+    // Run rsync to backup config to R2
+    const syncCmd = `rsync -a --delete --exclude='*.lock' --exclude='*.log' --exclude='*.tmp' /root/.clawdbot/ ${R2_MOUNT_PATH}/ && date -Iseconds > ${R2_MOUNT_PATH}/.last-sync`;
+    
+    const proc = await sandbox.startProcess(syncCmd);
+    await waitForProcess(proc, 30000); // 30 second timeout for sync
+
+    const logs = await proc.getLogs();
+    
+    if (proc.status === 'completed' || proc.exitCode === 0) {
+      // Read the timestamp we just wrote
+      const timestampProc = await sandbox.startProcess(`cat ${R2_MOUNT_PATH}/.last-sync`);
+      await waitForProcess(timestampProc, 5000);
+      const timestampLogs = await timestampProc.getLogs();
+      const lastSync = timestampLogs.stdout?.trim() || new Date().toISOString();
+
+      return c.json({
+        success: true,
+        message: 'Sync completed successfully',
+        lastSync,
+      });
+    } else {
+      return c.json({
+        success: false,
+        error: 'Sync failed',
+        details: logs.stderr || logs.stdout,
+      }, 500);
+    }
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+    return c.json({ error: errorMessage }, 500);
+  }
 });
 
 // POST /api/gateway/restart - Kill the current gateway and start a new one

@@ -55,7 +55,11 @@
       "binding": "CLAWDBOT_BUCKET",
       "bucket_name": "clawdbot-data"
     }
-  ]
+  ],
+  // Cron trigger to sync clawdbot data to R2 every 5 minutes
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  }
   // Secrets to configure via `wrangler secret put`:
   // - ANTHROPIC_API_KEY: Your Anthropic API key
   // - CF_ACCESS_TEAM_DOMAIN: Cloudflare Access team domain

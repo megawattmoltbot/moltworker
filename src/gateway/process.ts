@@ -48,7 +48,8 @@ export async function findExistingClawdbotProcess(sandbox: Sandbox): Promise<Pro
  */
 export async function ensureClawdbotGateway(sandbox: Sandbox, env: ClawdbotEnv): Promise<Process> {
   // Mount R2 storage for persistent data (non-blocking if not configured)
-  const r2Mounted = await mountR2Storage(sandbox, env);
+  // R2 is used as a backup - the startup script will restore from it on boot
+  await mountR2Storage(sandbox, env);
 
   // Check if Clawdbot is already running or starting
   const existingProcess = await findExistingClawdbotProcess(sandbox);
@@ -76,7 +77,7 @@ export async function ensureClawdbotGateway(sandbox: Sandbox, env: ClawdbotEnv):
 
   // Start a new Clawdbot gateway
   console.log('Starting new Clawdbot gateway...');
-  const envVars = buildEnvVars(env, r2Mounted);
+  const envVars = buildEnvVars(env);
   const command = '/usr/local/bin/start-clawdbot.sh';
 
   console.log('Starting process with command:', command);

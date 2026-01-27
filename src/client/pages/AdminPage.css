@@ -1,4 +1,4 @@
-/* Devices Page Styles */
+/* Admin Page Styles */
 .devices-page {
   display: flex;
   flex-direction: column;
@@ -93,6 +93,31 @@
   padding: 1rem;
   color: var(--success-color);
   font-size: 0.875rem;
+}
+
+.success-banner .storage-status {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 1rem;
+  flex-wrap: wrap;
+}
+
+.success-banner .storage-info {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.success-banner .last-sync {
+  font-size: 0.8rem;
+  opacity: 0.8;
+}
+
+/* Small button variant */
+.btn-sm {
+  padding: 0.375rem 0.75rem;
+  font-size: 0.8rem;
 }
 
 /* Section styles */

@@ -1,9 +1,10 @@
 #!/bin/bash
 # Startup script for Clawdbot in Cloudflare Sandbox
-# This script configures clawdbot from environment variables and starts the gateway
-#
-# When R2 storage is mounted, CLAWDBOT_STATE_DIR and CLAWDBOT_CONFIG_PATH will be set
-# to point to the mounted directory for persistent storage across sessions.
+# This script:
+# 1. Restores config from R2 backup if available
+# 2. Configures clawdbot from environment variables
+# 3. Starts a background sync to backup config to R2
+# 4. Starts the gateway
 
 set -e
 
@@ -13,25 +14,38 @@ if pgrep -f "clawdbot gateway" > /dev/null 2>&1; then
     exit 0
 fi
 
-# Use CLAWDBOT_STATE_DIR if set (R2 mounted), otherwise default to /root/.clawdbot
-CONFIG_DIR="${CLAWDBOT_STATE_DIR:-/root/.clawdbot}"
-CONFIG_FILE="${CLAWDBOT_CONFIG_PATH:-$CONFIG_DIR/clawdbot.json}"
+# Paths
+CONFIG_DIR="/root/.clawdbot"
+CONFIG_FILE="$CONFIG_DIR/clawdbot.json"
 TEMPLATE_DIR="/root/.clawdbot-templates"
 TEMPLATE_FILE="$TEMPLATE_DIR/clawdbot.json.template"
+BACKUP_DIR="/data/clawdbot"
 
 echo "Config directory: $CONFIG_DIR"
-echo "Config file: $CONFIG_FILE"
+echo "Backup directory: $BACKUP_DIR"
 
-# Create config directory if it doesn't exist (may already exist from R2 mount)
+# Create config directory
 mkdir -p "$CONFIG_DIR"
 
-# If config file doesn't exist (fresh R2 mount or first run), create from template
+# ============================================================
+# RESTORE FROM R2 BACKUP
+# ============================================================
+# If R2 is mounted and has a backup, restore it
+if [ -d "$BACKUP_DIR" ] && [ -f "$BACKUP_DIR/clawdbot.json" ]; then
+    echo "Found R2 backup, restoring..."
+    cp -a "$BACKUP_DIR/." "$CONFIG_DIR/" 2>/dev/null || true
+    echo "Restored config from R2 backup"
+else
+    echo "No R2 backup found, starting fresh"
+fi
+
+# If config file still doesn't exist, create from template
 if [ ! -f "$CONFIG_FILE" ]; then
     echo "No existing config found, initializing from template..."
     if [ -f "$TEMPLATE_FILE" ]; then
         cp "$TEMPLATE_FILE" "$CONFIG_FILE"
     else
-        # Create minimal config if template doesn't exist (new config format)
+        # Create minimal config if template doesn't exist
         cat > "$CONFIG_FILE" << 'EOFCONFIG'
 {
   "agents": {
@@ -50,14 +64,16 @@ if [ ! -f "$CONFIG_FILE" ]; then
 EOFCONFIG
     fi
 else
-    echo "Using existing config from persistent storage"
+    echo "Using existing config"
 fi
 
-# Use Node.js for JSON manipulation since jq might not be available
+# ============================================================
+# UPDATE CONFIG FROM ENVIRONMENT VARIABLES
+# ============================================================
 node << EOFNODE
 const fs = require('fs');
 
-const configPath = process.env.CLAWDBOT_CONFIG_PATH || '/root/.clawdbot/clawdbot.json';
+const configPath = '/root/.clawdbot/clawdbot.json';
 console.log('Updating config at:', configPath);
 let config = {};
 
@@ -67,7 +83,7 @@ try {
     console.log('Starting with empty config');
 }
 
-// Ensure nested objects exist (new config format)
+// Ensure nested objects exist
 config.agents = config.agents || {};
 config.agents.defaults = config.agents.defaults || {};
 config.agents.defaults.model = config.agents.defaults.model || {};
@@ -77,22 +93,15 @@ config.channels = config.channels || {};
 // Gateway configuration
 config.gateway.port = 18789;
 config.gateway.mode = 'local';
-
-// Trust proxy headers from Cloudflare (10.x.x.x is the container network)
-// This allows clawdbot to see the real client IP and treat connections appropriately
-// Try multiple formats to find what clawdbot expects
 config.gateway.trustedProxies = ['10.1.0.0'];
 
 // Set gateway token if provided
-// Token allows authenticated access, but device pairing still works for non-token connections
 if (process.env.CLAWDBOT_GATEWAY_TOKEN) {
     config.gateway.auth = config.gateway.auth || {};
     config.gateway.auth.token = process.env.CLAWDBOT_GATEWAY_TOKEN;
-    // Don't set auth.mode = 'token' as that disables device pairing entirely
 }
 
-// Only allow insecure auth for local dev (when CLAWDBOT_DEV_MODE=true)
-// In production, device pairing is required even with token auth
+// Allow insecure auth for dev mode
 if (process.env.CLAWDBOT_DEV_MODE === 'true') {
     config.gateway.controlUi = config.gateway.controlUi || {};
     config.gateway.controlUi.allowInsecureAuth = true;
@@ -103,8 +112,6 @@ if (process.env.TELEGRAM_BOT_TOKEN) {
     config.channels.telegram = config.channels.telegram || {};
     config.channels.telegram.botToken = process.env.TELEGRAM_BOT_TOKEN;
     config.channels.telegram.enabled = true;
-    
-    // DM policy
     config.channels.telegram.dm = config.channels.telegram.dm || {};
     config.channels.telegram.dm.policy = process.env.TELEGRAM_DM_POLICY || 'pairing';
 }
@@ -114,7 +121,6 @@ if (process.env.DISCORD_BOT_TOKEN) {
     config.channels.discord = config.channels.discord || {};
     config.channels.discord.token = process.env.DISCORD_BOT_TOKEN;
     config.channels.discord.enabled = true;
-    
     config.channels.discord.dm = config.channels.discord.dm || {};
     config.channels.discord.dm.policy = process.env.DISCORD_DM_POLICY || 'pairing';
 }
@@ -133,20 +139,20 @@ console.log('Configuration updated successfully');
 console.log('Config:', JSON.stringify(config, null, 2));
 EOFNODE
 
+# ============================================================
+# START GATEWAY
+# ============================================================
+# Note: R2 backup sync is handled by the Worker's cron trigger
 echo "Starting Clawdbot Gateway..."
 echo "Gateway will be available on port 18789"
 
-# Clean up stale lock files (process check already happened above)
+# Clean up stale lock files
 rm -f /tmp/clawdbot-gateway.lock 2>/dev/null || true
-rm -f /root/.clawdbot/gateway.lock 2>/dev/null || true
+rm -f "$CONFIG_DIR/gateway.lock" 2>/dev/null || true
 
-# Always bind to 0.0.0.0 (lan mode) since Worker connects via container network
 BIND_MODE="lan"
 echo "Dev mode: ${CLAWDBOT_DEV_MODE:-false}, Bind mode: $BIND_MODE"
 
-# Start the gateway
-# If CLAWDBOT_GATEWAY_TOKEN is set, use token auth (skips device pairing)
-# If not set, rely on device pairing for authentication
 if [ -n "$CLAWDBOT_GATEWAY_TOKEN" ]; then
     echo "Starting gateway with token auth..."
     exec clawdbot gateway --port 18789 --verbose --allow-unconfigured --bind "$BIND_MODE" --token "$CLAWDBOT_GATEWAY_TOKEN"

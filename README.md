@@ -151,12 +151,21 @@ To find your Account ID: Go to the [Cloudflare Dashboard](https://dash.cloudflar
 
 ### How It Works
 
-When R2 credentials are configured:
-- The R2 bucket is mounted at `/data/clawdbot` in the container
-- Clawdbot uses this directory for all its state via `CLAWDBOT_STATE_DIR`
-- All data persists across container restarts and redeployments
+R2 storage uses a backup/restore approach for simplicity:
 
-Without R2 credentials, clawdbot still works but uses ephemeral storage.
+**On container startup:**
+- If R2 is mounted and contains backup data, it's restored to `/root/.clawdbot`
+- Clawdbot uses its default paths (no special configuration needed)
+
+**During operation:**
+- A cron job runs every 5 minutes to sync `/root/.clawdbot` → R2
+- You can also trigger a manual backup from the admin UI at `/_admin/`
+
+**In the admin UI:**
+- When R2 is configured, you'll see "Last backup: [timestamp]"
+- Click "Backup Now" to trigger an immediate sync
+
+Without R2 credentials, clawdbot still works but uses ephemeral storage (data lost on container restart).
 
 ## Container Lifecycle
 
@@ -174,10 +183,9 @@ When the container sleeps, the next request will trigger a cold start. If you ha
 ## Admin UI
 
 Access the admin UI at `/_admin/` to:
+- **R2 Storage Status** - Shows if R2 is configured, last backup time, and a "Backup Now" button
 - **Restart Gateway** - Kill and restart the clawdbot gateway process
-- View pending device pairing requests
-- Approve devices individually or all at once
-- View paired devices
+- **Device Pairing** - View pending requests, approve devices individually or all at once, view paired devices
 
 The admin UI requires Cloudflare Access authentication (or `DEV_MODE=true` for local development).
 

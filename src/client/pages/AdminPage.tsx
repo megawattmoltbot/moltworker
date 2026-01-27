@@ -5,13 +5,14 @@ import {
   approveAllDevices,
   restartGateway,
   getStorageStatus,
+  triggerSync,
   AuthError,
   type PendingDevice,
   type PairedDevice,
   type DeviceListResponse,
   type StorageStatusResponse,
 } from '../api'
-import './DevicesPage.css'
+import './AdminPage.css'
 
 // Small inline spinner for buttons
 function ButtonSpinner() {
@@ -26,6 +27,7 @@ export default function DevicesPage() {
   const [error, setError] = useState<string | null>(null)
   const [actionInProgress, setActionInProgress] = useState<string | null>(null)
   const [restartInProgress, setRestartInProgress] = useState(false)
+  const [syncInProgress, setSyncInProgress] = useState(false)
 
   const fetchDevices = useCallback(async () => {
     try {
@@ -122,6 +124,34 @@ export default function DevicesPage() {
     }
   }
 
+  const handleSync = async () => {
+    setSyncInProgress(true)
+    try {
+      const result = await triggerSync()
+      if (result.success) {
+        // Update the storage status with new lastSync time
+        setStorageStatus(prev => prev ? { ...prev, lastSync: result.lastSync || null } : null)
+        setError(null)
+      } else {
+        setError(result.error || 'Sync failed')
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to sync')
+    } finally {
+      setSyncInProgress(false)
+    }
+  }
+
+  const formatSyncTime = (isoString: string | null) => {
+    if (!isoString) return 'Never'
+    try {
+      const date = new Date(isoString)
+      return date.toLocaleString()
+    } catch {
+      return isoString
+    }
+  }
+
   const formatTimestamp = (ts: number) => {
     const date = new Date(ts)
     return date.toLocaleString()
@@ -168,7 +198,22 @@ export default function DevicesPage() {
 
       {storageStatus?.configured && (
         <div className="success-banner">
-          <span>R2 storage is configured. Your data will persist across container restarts.</span>
+          <div className="storage-status">
+            <div className="storage-info">
+              <span>R2 storage is configured. Your data will persist across container restarts.</span>
+              <span className="last-sync">
+                Last backup: {formatSyncTime(storageStatus.lastSync)}
+              </span>
+            </div>
+            <button
+              className="btn btn-secondary btn-sm"
+              onClick={handleSync}
+              disabled={syncInProgress}
+            >
+              {syncInProgress && <ButtonSpinner />}
+              {syncInProgress ? 'Syncing...' : 'Backup Now'}
+            </button>
+          </div>
         </div>
       )}
 

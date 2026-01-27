@@ -15,25 +15,25 @@ function createEnv(overrides: Partial<ClawdbotEnv> = {}): ClawdbotEnv {
 describe('buildEnvVars', () => {
   it('returns empty object when no env vars set', () => {
     const env = createEnv();
-    const result = buildEnvVars(env, false);
+    const result = buildEnvVars(env);
     expect(result).toEqual({});
   });
 
   it('includes ANTHROPIC_API_KEY when set', () => {
     const env = createEnv({ ANTHROPIC_API_KEY: 'sk-test-key' });
-    const result = buildEnvVars(env, false);
+    const result = buildEnvVars(env);
     expect(result.ANTHROPIC_API_KEY).toBe('sk-test-key');
   });
 
   it('includes OPENAI_API_KEY when set', () => {
     const env = createEnv({ OPENAI_API_KEY: 'sk-openai-key' });
-    const result = buildEnvVars(env, false);
+    const result = buildEnvVars(env);
     expect(result.OPENAI_API_KEY).toBe('sk-openai-key');
   });
 
   it('includes CLAWDBOT_GATEWAY_TOKEN when set', () => {
     const env = createEnv({ CLAWDBOT_GATEWAY_TOKEN: 'my-token' });
-    const result = buildEnvVars(env, false);
+    const result = buildEnvVars(env);
     expect(result.CLAWDBOT_GATEWAY_TOKEN).toBe('my-token');
   });
 
@@ -46,7 +46,7 @@ describe('buildEnvVars', () => {
       SLACK_BOT_TOKEN: 'slack-bot',
       SLACK_APP_TOKEN: 'slack-app',
     });
-    const result = buildEnvVars(env, false);
+    const result = buildEnvVars(env);
     
     expect(result.TELEGRAM_BOT_TOKEN).toBe('tg-token');
     expect(result.TELEGRAM_DM_POLICY).toBe('pairing');
@@ -56,28 +56,12 @@ describe('buildEnvVars', () => {
     expect(result.SLACK_APP_TOKEN).toBe('slack-app');
   });
 
-  it('sets R2 paths when r2Mounted is true', () => {
-    const env = createEnv();
-    const result = buildEnvVars(env, true);
-    
-    expect(result.CLAWDBOT_STATE_DIR).toBe('/data/clawdbot');
-    expect(result.CLAWDBOT_CONFIG_PATH).toBe('/data/clawdbot/clawdbot.json');
-  });
-
-  it('does not set R2 paths when r2Mounted is false', () => {
-    const env = createEnv();
-    const result = buildEnvVars(env, false);
-    
-    expect(result.CLAWDBOT_STATE_DIR).toBeUndefined();
-    expect(result.CLAWDBOT_CONFIG_PATH).toBeUndefined();
-  });
-
   it('maps DEV_MODE to CLAWDBOT_DEV_MODE for container', () => {
     const env = createEnv({
       DEV_MODE: 'true',
       CLAWDBOT_BIND_MODE: 'lan',
     });
-    const result = buildEnvVars(env, false);
+    const result = buildEnvVars(env);
     
     // DEV_MODE is passed to container as CLAWDBOT_DEV_MODE
     expect(result.CLAWDBOT_DEV_MODE).toBe('true');
@@ -90,14 +74,12 @@ describe('buildEnvVars', () => {
       CLAWDBOT_GATEWAY_TOKEN: 'token',
       TELEGRAM_BOT_TOKEN: 'tg',
     });
-    const result = buildEnvVars(env, true);
+    const result = buildEnvVars(env);
     
     expect(result).toEqual({
       ANTHROPIC_API_KEY: 'sk-key',
       CLAWDBOT_GATEWAY_TOKEN: 'token',
       TELEGRAM_BOT_TOKEN: 'tg',
-      CLAWDBOT_STATE_DIR: '/data/clawdbot',
-      CLAWDBOT_CONFIG_PATH: '/data/clawdbot/clawdbot.json',
     });
   });
 });
