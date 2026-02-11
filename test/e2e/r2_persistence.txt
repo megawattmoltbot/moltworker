@@ -41,7 +41,7 @@ WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
 LAST_RESULT=""
 for attempt in 1 2 3; do
     LAST_RESULT=$(./curl-auth -s -X POST "$WORKER_URL/api/admin/storage/sync")
-    SUCCESS=$(echo "$LAST_RESULT" | jq -r '.success // false')
+    SUCCESS=$(echo "$LAST_RESULT" | jq -r '.success // false' 2>/dev/null)
     if [ "$SUCCESS" = "true" ]; then
         break
     fi
@@ -111,19 +111,7 @@ where
 * result.stdout contains "done"
 
 ===
-verify marker file exists
-%require
-===
-WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
-./curl-auth -s "$WORKER_URL/debug/cli?cmd=cat+/root/clawd/e2e-marker.txt" | jq .
----
-{{ result: json object }}
----
-where
-* result.stdout contains "e2e-persistence-test"
-
-===
-sync after workspace change
+sync workspace with marker file
 %require
 ===
 WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
@@ -135,7 +123,57 @@ where
 * result.success == true
 
 ===
-restart gateway
+verify marker file reached R2
+%require
+===
+WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
+BUCKET=$(cat "$CCTR_FIXTURE_DIR/r2-bucket-name.txt" 2>/dev/null || echo "moltbot-data")
+./curl-auth -s "$WORKER_URL/debug/cli?cmd=rclone+ls+r2:${BUCKET}/workspace/e2e-marker.txt" | jq .
+---
+{{ result: json object }}
+---
+where
+* result.stdout contains "e2e-marker.txt"
+
+===
+verify config reached R2
+%require
+===
+WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
+BUCKET=$(cat "$CCTR_FIXTURE_DIR/r2-bucket-name.txt" 2>/dev/null || echo "moltbot-data")
+./curl-auth -s "$WORKER_URL/debug/cli?cmd=rclone+ls+r2:${BUCKET}/openclaw/openclaw.json" | jq .
+---
+{{ result: json object }}
+---
+where
+* result.stdout contains "openclaw.json"
+
+===
+stop background sync and delete marker file locally
+%require
+===
+WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
+./curl-auth -s "$WORKER_URL/debug/cli?cmd=pkill+-f+r2-sync.sh;+rm+/root/clawd/e2e-marker.txt+%26%26+echo+deleted" | jq .
+---
+{{ result: json object }}
+---
+where
+* result.stdout contains "deleted"
+
+===
+confirm marker file is gone locally
+%require
+===
+WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
+./curl-auth -s "$WORKER_URL/debug/cli?cmd=test+-f+/root/clawd/e2e-marker.txt+%26%26+echo+exists+||+echo+missing" | jq .
+---
+{{ result: json object }}
+---
+where
+* result.stdout contains "missing"
+
+===
+restart gateway to trigger restore from R2
 %require
 ===
 WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
@@ -147,33 +185,22 @@ where
 * result.success == true
 
 ===
-wait for gateway to come back after restart
+verify marker file restored from R2 after restart
 %require
 ===
 WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
-for i in $(seq 1 60); do
-    RESPONSE=$(./curl-auth -s "$WORKER_URL/api/admin/storage" 2>/dev/null || echo "")
-    CONFIGURED=$(echo "$RESPONSE" | jq -r '.configured // empty' 2>/dev/null)
-    if [ "$CONFIGURED" = "true" ]; then
-        echo "gateway ready after ${i} attempts"
+# Poll for the marker file — start-openclaw.sh runs rclone restore
+# before starting the gateway, but the Worker responds before the
+# gateway process finishes starting.
+for i in $(seq 1 30); do
+    RESPONSE=$(./curl-auth -s "$WORKER_URL/debug/cli?cmd=cat+/root/clawd/e2e-marker.txt" 2>/dev/null || echo "")
+    if echo "$RESPONSE" | jq -r '.stdout // empty' 2>/dev/null | grep -q "e2e-persistence-test"; then
+        echo "$RESPONSE" | jq .
         exit 0
     fi
     sleep 5
 done
-echo "gateway did not come back after 60 attempts"
-exit 1
----
-{{ output }}
----
-where
-* output contains "gateway ready"
-
-===
-verify marker file survived restart
-%require
-===
-WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
-./curl-auth -s "$WORKER_URL/debug/cli?cmd=cat+/root/clawd/e2e-marker.txt" | jq .
+echo "$RESPONSE" | jq .
 ---
 {{ result: json object }}
 ---
@@ -181,7 +208,7 @@ where
 * result.stdout contains "e2e-persistence-test"
 
 ===
-sync still works after restart
+sync still works after restore
 ===
 WORKER_URL=$(cat "$CCTR_FIXTURE_DIR/worker-url.txt")
 ./curl-auth -s -X POST "$WORKER_URL/api/admin/storage/sync" | jq .

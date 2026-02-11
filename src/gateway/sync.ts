@@ -1,8 +1,7 @@
 import type { Sandbox } from '@cloudflare/sandbox';
 import type { MoltbotEnv } from '../types';
-import { R2_MOUNT_PATH } from '../config';
-import { mountR2Storage } from './r2';
-import { waitForProcess } from './utils';
+import { getR2BucketName } from '../config';
+import { ensureRcloneConfig } from './r2';
 
 export interface SyncResult {
   success: boolean;
@@ -11,174 +10,76 @@ export interface SyncResult {
   details?: string;
 }
 
-async function runCommand(
-  sandbox: Sandbox,
-  cmd: string,
-  timeoutMs: number,
-): Promise<{ stdout: string; stderr: string; status: string }> {
-  const proc = await sandbox.startProcess(cmd);
-  await waitForProcess(proc, timeoutMs);
-  const logs = await proc.getLogs();
-  // proc.status is a stale snapshot; get fresh status
-  const status = proc.getStatus ? await proc.getStatus() : proc.status;
-  return {
-    stdout: logs.stdout || '',
-    stderr: logs.stderr || '',
-    status,
-  };
-}
+const RCLONE_FLAGS = '--transfers=16 --fast-list --s3-no-check-bucket';
+const LAST_SYNC_FILE = '/tmp/.last-sync';
 
-function buildSyncCmd(configDir: string): string {
-  // Exclude .git dirs (workspace/.git/ has 50+ hook files, each slow over s3fs).
-  return [
-    `rsync -r --no-times --delete --exclude='*.lock' --exclude='*.log' --exclude='*.tmp' --exclude='.git' ${configDir}/ ${R2_MOUNT_PATH}/openclaw/`,
-    `([ -d /root/clawd ] && rsync -r --no-times --delete --exclude='skills' --exclude='.git' /root/clawd/ ${R2_MOUNT_PATH}/workspace/ || true)`,
-    `([ -d /root/clawd/skills ] && rsync -r --no-times --delete /root/clawd/skills/ ${R2_MOUNT_PATH}/skills/ || true)`,
-    `date -Iseconds > ${R2_MOUNT_PATH}/.last-sync`,
-  ].join(' && ');
+function rcloneRemote(env: MoltbotEnv, prefix: string): string {
+  return `r2:${getR2BucketName(env)}/${prefix}`;
 }
 
 /**
- * Fire-and-forget sync for use in cron handlers.
- *
- * Starts the rsync chain but does NOT poll for completion. The scheduled
- * handler has a strict time limit — polling competes with slow s3fs
- * operations and can exceed it, causing an unhandled exception that resets
- * the Durable Object and kills the container.
- *
- * The cron fires every 5 minutes, so if one sync fails, the next catches it.
+ * Detect which config directory exists in the container.
  */
-export async function fireAndForgetSync(sandbox: Sandbox, env: MoltbotEnv): Promise<void> {
-  if (!env.R2_ACCESS_KEY_ID || !env.R2_SECRET_ACCESS_KEY || !env.CF_ACCOUNT_ID) {
-    console.log('[cron] R2 not configured, skipping');
-    return;
-  }
-
-  const mounted = await mountR2Storage(sandbox, env);
-  if (!mounted) {
-    console.log('[cron] R2 mount failed, skipping');
-    return;
-  }
-
-  const checkNew = await runCommand(
-    sandbox,
-    'test -f /root/.openclaw/openclaw.json && echo exists',
-    5000,
+async function detectConfigDir(sandbox: Sandbox): Promise<string | null> {
+  const check = await sandbox.exec(
+    'test -f /root/.openclaw/openclaw.json && echo openclaw || ' +
+      '(test -f /root/.clawdbot/clawdbot.json && echo clawdbot || echo none)',
   );
-  let configDir = '';
-  if (checkNew.stdout.includes('exists')) {
-    configDir = '/root/.openclaw';
-  } else {
-    const checkLegacy = await runCommand(
-      sandbox,
-      'test -f /root/.clawdbot/clawdbot.json && echo exists',
-      5000,
-    );
-    if (checkLegacy.stdout.includes('exists')) {
-      configDir = '/root/.clawdbot';
-    } else {
-      console.log('[cron] No config file found, skipping');
-      return;
-    }
-  }
-
-  await sandbox.startProcess(buildSyncCmd(configDir));
-  console.log('[cron] Sync command started (fire-and-forget)');
+  const result = check.stdout?.trim();
+  if (result === 'openclaw') return '/root/.openclaw';
+  if (result === 'clawdbot') return '/root/.clawdbot';
+  return null;
 }
 
 /**
  * Sync OpenClaw config and workspace from container to R2 for persistence.
- *
- * This function:
- * 1. Mounts R2 if not already mounted
- * 2. Verifies source has critical files (prevents overwriting good backup with empty data)
- * 3. Runs rsync to copy config, workspace, and skills to R2
- * 4. Writes a timestamp file for tracking
- *
- * Syncs up to three directories:
- * - Config: /root/.openclaw/ (or /root/.clawdbot/) → R2:/openclaw/
- * - Workspace: /root/clawd/ → R2:/workspace/ (if exists)
- * - Skills: /root/clawd/skills/ → R2:/skills/ (if exists)
+ * Uses rclone for direct S3 API access (no FUSE mount overhead).
  */
-export async function syncToR2(
-  sandbox: Sandbox,
-  env: MoltbotEnv,
-  pollIntervalMs: number = 2000,
-  maxPolls: number = 90,
-): Promise<SyncResult> {
-  if (!env.R2_ACCESS_KEY_ID || !env.R2_SECRET_ACCESS_KEY || !env.CF_ACCOUNT_ID) {
+export async function syncToR2(sandbox: Sandbox, env: MoltbotEnv): Promise<SyncResult> {
+  if (!(await ensureRcloneConfig(sandbox, env))) {
     return { success: false, error: 'R2 storage is not configured' };
   }
 
-  const mounted = await mountR2Storage(sandbox, env);
-  if (!mounted) {
-    return { success: false, error: 'Failed to mount R2 storage' };
-  }
-
-  // Determine which config directory exists
-  // Use stdout-based detection: exitCode is unreliable (often undefined in sandbox API)
-  let configDir = '';
-  try {
-    const checkNew = await runCommand(
-      sandbox,
-      'test -f /root/.openclaw/openclaw.json && echo exists',
-      5000,
-    );
-    if (checkNew.stdout.includes('exists')) {
-      configDir = '/root/.openclaw';
-    } else {
-      const checkLegacy = await runCommand(
-        sandbox,
-        'test -f /root/.clawdbot/clawdbot.json && echo exists',
-        5000,
-      );
-      if (checkLegacy.stdout.includes('exists')) {
-        configDir = '/root/.clawdbot';
-      } else {
-        return {
-          success: false,
-          error: 'Sync aborted: no config file found',
-          details: 'Neither openclaw.json nor clawdbot.json found in config directory.',
-        };
-      }
-    }
-  } catch (err) {
+  const configDir = await detectConfigDir(sandbox);
+  if (!configDir) {
     return {
       success: false,
-      error: 'Failed to verify source files',
-      details: err instanceof Error ? err.message : 'Unknown error',
+      error: 'Sync aborted: no config file found',
+      details: 'Neither openclaw.json nor clawdbot.json found in config directory.',
     };
   }
 
-  const syncCmd = buildSyncCmd(configDir);
+  const remote = (prefix: string) => rcloneRemote(env, prefix);
 
-  try {
-    await sandbox.startProcess(syncCmd);
-  } catch (err) {
+  // Sync config (rclone sync propagates deletions)
+  const configResult = await sandbox.exec(
+    `rclone sync ${configDir}/ ${remote('openclaw/')} ${RCLONE_FLAGS} --exclude='*.lock' --exclude='*.log' --exclude='*.tmp' --exclude='.git/**'`,
+    { timeout: 120000 },
+  );
+  if (!configResult.success) {
     return {
       success: false,
-      error: 'Sync error',
-      details: err instanceof Error ? err.message : 'Unknown error',
+      error: 'Config sync failed',
+      details: configResult.stderr?.slice(-500),
     };
   }
 
-  // Poll for the timestamp file to appear (proves the entire && chain completed)
-  for (let i = 0; i < maxPolls; i++) {
-    // eslint-disable-next-line no-await-in-loop -- intentional sequential polling
-    await new Promise((r) => setTimeout(r, pollIntervalMs));
-    try {
-      const ts = await runCommand(sandbox, `cat ${R2_MOUNT_PATH}/.last-sync`, 10000); // eslint-disable-line no-await-in-loop -- intentional sequential polling
-      const lastSync = ts.stdout.trim();
-      if (lastSync && lastSync.match(/^\d{4}-\d{2}-\d{2}/)) {
-        return { success: true, lastSync };
-      }
-    } catch {
-      // cat failed, keep polling
-    }
-  }
-  return {
-    success: false,
-    error: 'Sync timed out',
-    details: 'Timestamp file not created within 3 minutes',
-  };
+  // Sync workspace (non-fatal, rclone sync propagates deletions)
+  await sandbox.exec(
+    `test -d /root/clawd && rclone sync /root/clawd/ ${remote('workspace/')} ${RCLONE_FLAGS} --exclude='skills/**' --exclude='.git/**' || true`,
+    { timeout: 120000 },
+  );
+
+  // Sync skills (non-fatal)
+  await sandbox.exec(
+    `test -d /root/clawd/skills && rclone sync /root/clawd/skills/ ${remote('skills/')} ${RCLONE_FLAGS} || true`,
+    { timeout: 120000 },
+  );
+
+  // Write timestamp
+  await sandbox.exec(`date -Iseconds > ${LAST_SYNC_FILE}`);
+  const tsResult = await sandbox.exec(`cat ${LAST_SYNC_FILE}`);
+  const lastSync = tsResult.stdout?.trim();
+
+  return { success: true, lastSync };
 }
