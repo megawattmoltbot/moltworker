@@ -446,4 +446,22 @@ app.all('*', async (c) => {
 
 export default {
   fetch: app.fetch,
+  
+  async scheduled(
+    event: ScheduledEvent,
+    env: MoltbotEnv,
+    ctx: ExecutionContext
+  ): Promise<void> {
+    console.log('[SCHEDULED] Keepalive ping at', new Date().toISOString());
+    const sandbox = getSandbox(env.Sandbox, 'moltbot', { keepAlive: true });
+    try {
+      const response = await sandbox.containerFetch(
+        new Request('http://localhost/health'),
+        MOLTBOT_PORT
+      );
+      console.log('[SCHEDULED] Ping status:', response.status);
+    } catch (error) {
+      console.error('[SCHEDULED] Ping failed:', error);
+    }
+  },
 };
