@@ -67,6 +67,9 @@
   "browser": {
     "binding": "BROWSER",
   },
+  "triggers": {
+    "crons": ["*/5 * * * *"]
+  }
   // Note: CF_ACCOUNT_ID should be set via `wrangler secret put CF_ACCOUNT_ID`
   // Secrets to configure via `wrangler secret put`:
   //
